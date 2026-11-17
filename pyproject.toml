@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconcilehub"
+version = "1.0.0"
+description = "Thread-safe payment-to-invoice reconciliation service with tiered matching, idempotent retries and atomic batches."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Aryan Sharma" }]
+requires-python = ">=3.10"
+dependencies = []  # standard library only
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+reconcilehub = "reconcilehub.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
