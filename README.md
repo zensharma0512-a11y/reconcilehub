@@ -1,6 +1,6 @@
 # ReconcileHub
 
-[![CI](https://github.com/YOUR_USERNAME/reconcilehub/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/reconcilehub/actions/workflows/ci.yml)
+[![CI](https://github.com/zensharma0512-a11y/reconcilehub/actions/workflows/ci.yml/badge.svg)](https://github.com/zensharma0512-a11y/reconcilehub/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)
 ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 
@@ -36,7 +36,7 @@ POST /payments/batch   ──►  validate all ──► for each payment:
 ## Quick start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/reconcilehub.git
+git clone https://github.com/zensharma0512-a11y/reconcilehub.git
 cd reconcilehub
 python -m pip install -e ".[dev]"     # only pytest is installed, for tests
 python -m pytest                       # run the 91 tests
