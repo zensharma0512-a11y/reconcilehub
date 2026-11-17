@@ -34,6 +34,7 @@ from .validation import parse_json
 log = logging.getLogger("reconcilehub.http")
 
 MAX_BODY_BYTES = 1_048_576  # 1 MiB
+MAX_DRAIN_BYTES = 8 * MAX_BODY_BYTES  # read & discard at most this much of an oversized body
 
 _ROUTES: list[tuple[re.Pattern[str], dict[str, str]]] = [
     (re.compile(r"^/health$"), {"GET": "health"}),
@@ -106,14 +107,21 @@ class ReconcileHandler(BaseHTTPRequestHandler):
         self._discard_body()
         self._send(*_error(404, "ROUTE_NOT_FOUND", f"No route for {parts.path}"))
 
+    def _drain(self, n: int) -> None:
+        while n > 0:
+            chunk = self.rfile.read(min(n, 65536))
+            if not chunk:
+                break
+            n -= len(chunk)
+
     def _discard_body(self) -> None:
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
-        if 0 < length <= MAX_BODY_BYTES:
-            self.rfile.read(length)
-        elif length > MAX_BODY_BYTES:
+        if length > 0:
+            self._drain(min(length, MAX_DRAIN_BYTES))
+        if length > MAX_BODY_BYTES:
             self.close_connection = True
 
     def _read_json(self) -> tuple[Any, tuple[int, dict[str, Any]] | None]:
@@ -130,6 +138,9 @@ class ReconcileHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return None, _error(400, "MALFORMED_REQUEST", "Invalid Content-Length")
         if length > MAX_BODY_BYTES:
+            # Drain (up to a cap) before replying: if we answer and close while
+            # the client is still sending, it sees "broken pipe" instead of 413.
+            self._drain(min(length, MAX_DRAIN_BYTES))
             self.close_connection = True
             return None, _error(413, "PAYLOAD_TOO_LARGE", f"Body must be at most {MAX_BODY_BYTES} bytes")
         raw = self.rfile.read(length)
