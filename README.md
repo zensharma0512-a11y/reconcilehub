@@ -149,6 +149,12 @@ a string.
 the race window with a 1 ms sleep) makes 4 of the 6 concurrency tests fail. A
 test that can't fail proves nothing.
 
+**A real bug the tests caught.** The concurrent HTTP test began failing
+intermittently with `ConnectionResetError`. The cause: Python's
+`ThreadingHTTPServer` has a default listen backlog of **5**, so a burst of 32
+simultaneous clients overflowed the kernel queue. The fix was to raise
+`request_queue_size` in the server rather than loosen the test.
+
 ## Limitations and next steps
 
 - State is held in memory. For production, use PostgreSQL with

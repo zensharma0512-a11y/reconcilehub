@@ -169,10 +169,15 @@ class ReconcileHandler(BaseHTTPRequestHandler):
         return self._write(self.service.process_payments)
 
 
+class ReconcileServer(ThreadingHTTPServer):
+    # The stdlib default listen backlog is 5: a burst of simultaneous clients
+    # beyond that gets "connection reset". Found by test_concurrent_http_clients.
+    request_queue_size = 128
+    daemon_threads = True
+
+
 def make_server(
     service: ReconciliationService, host: str = "127.0.0.1", port: int = 8080
 ) -> ThreadingHTTPServer:
     handler = type("BoundReconcileHandler", (ReconcileHandler,), {"service": service})
-    server = ThreadingHTTPServer((host, port), handler)
-    server.daemon_threads = True
-    return server
+    return ReconcileServer((host, port), handler)
