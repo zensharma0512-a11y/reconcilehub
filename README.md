@@ -155,6 +155,12 @@ intermittently with `ConnectionResetError`. The cause: Python's
 simultaneous clients overflowed the kernel queue. The fix was to raise
 `request_queue_size` in the server rather than loosen the test.
 
+**A second one, caught only in CI.** On GitHub's runners the "body too large"
+test failed with `BrokenPipeError`. The server replied 413 and closed the
+socket while the client was still uploading, so the client never read the
+response. Now the server reads and discards an oversized body (capped at 8 MiB)
+before it replies.
+
 ## Limitations and next steps
 
 - State is held in memory. For production, use PostgreSQL with
