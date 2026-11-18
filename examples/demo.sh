@@ -39,6 +39,16 @@ post /payments/batch pay-batch-2 '{"payments":[{"id":"PAY-5","amount":"10"},{"id
 step "6. Re-sending an already-processed payment under a new key -> 409"
 post /payments/batch pay-batch-3 '{"payments":[{"id":"PAY-1","amount":"1000.00"}]}'
 
-step "7. Read back"
+step "7. Exchange rates, then a payment in EUR (converted to USD before matching)"
+post /fx/rates/batch fx-batch-1 '{"rates":[
+  {"from":"EUR","to":"USD","rate":"1.08"},
+  {"from":"EUR","to":"GBP","rate":"0.86"},
+  {"from":"GBP","to":"USD","rate":"1.27"}]}'
+curl -sS "$BASE/fx/routes/EUR/USD"; echo
+curl -sS "$BASE/fx/best/EUR/USD"; echo
+post /invoices/batch inv-batch-fx '{"invoices":[{"id":"INV-2001","amount":"1092.20"}]}'
+post /payments/batch pay-batch-fx '{"payments":[{"id":"PAY-7","amount":"1000.00","currency":"EUR"}]}'
+
+step "8. Read back"
 curl -sS "$BASE/invoices?status=paid"; echo
 curl -sS "$BASE/health"; echo

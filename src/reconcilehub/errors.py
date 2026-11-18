@@ -66,3 +66,10 @@ class DuplicatePayment(ReconcileError):
 class NotFound(ReconcileError):
     status = 404
     code = "NOT_FOUND"
+
+
+class FxRateUnavailable(ReconcileError):
+    """A payment's currency can't be converted to the base currency."""
+
+    status = 422
+    code = "FX_RATE_UNAVAILABLE"

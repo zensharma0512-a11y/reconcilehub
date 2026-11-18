@@ -6,6 +6,8 @@
 
 A thread-safe service that matches incoming payments to open invoices.
 Invoices are registered in batches, and each invoice can be settled at most once.
+Payments can arrive in any currency: they are converted to the invoice currency
+through the best route in an exchange-rate book before matching.
 Clients can retry safely with idempotency keys, and every batch is applied
 completely or not at all. The REST API is built on the Python standard library
 alone, with no frameworks and no runtime dependencies.
@@ -29,9 +31,11 @@ POST /payments/batch   ──►  validate all ──► for each payment:
 | Idempotent retries | A request is fingerprinted with SHA-256 of its canonical JSON. A retry with the same key and body gets the stored response replayed. The same key with a different body gets **409**. | `test_idempotency_and_atomicity.py` |
 | All-or-nothing batches | Everything is validated before any change is made. Changes are recorded in an undo journal, which is rolled back if the batch crashes part-way. | Fault-injection tests that crash mid-batch |
 | Thread safety | A single lock covers check, execute and store. Stress tests use 64 threads released together through a barrier. | `tests/test_concurrency.py` (fails if the lock is removed) |
+| Multi-currency payments | Directed exchange-rate quotes are registered in atomic batches. A foreign payment is converted along the best route (searching simple paths, so arbitrage loops can't break it) and the rate and route are recorded on the result. A payment with no route rejects its whole batch. | `tests/test_fx.py` |
+| Deterministic FX routes | Rates within 1e-9 (relative) of the best count as equal; then fewer hops win, then the alphabetically smallest path. Errors in a rate batch are always reported in the same fixed order. | `test_near_ties_prefer_fewer_hops_then_alphabetical_path`, `test_errors_come_in_fixed_order` |
 | REST and status codes | 200, 201, 400, 404, 405 (with an `Allow` header), 409, 411, 413, 415, 422, 500 | `tests/test_http.py` |
 
-**91 tests, about 8 seconds.**
+**126 tests, about 7 seconds.**
 
 ## Quick start
 
@@ -39,8 +43,8 @@ POST /payments/batch   ──►  validate all ──► for each payment:
 git clone https://github.com/zensharma0512-a11y/reconcilehub.git
 cd reconcilehub
 python -m pip install -e ".[dev]"     # only pytest is installed, for tests
-python -m pytest                       # run the 91 tests
-python -m reconcilehub --port 8080 --tolerance 1.00
+python -m pytest                       # run the 126 tests
+python -m reconcilehub --port 8080 --tolerance 1.00 --base-currency USD
 ```
 
 Then, in another terminal, run `./examples/demo.sh` to try every endpoint.
@@ -78,8 +82,37 @@ If any ID already exists, the whole batch is rejected with **409 `DUPLICATE_INVO
 ] }
 ```
 
+A payment can carry a `currency`. If it isn't the base currency, the result shows
+what happened:
+
+```json
+{ "payment_id": "PAY-7", "amount": "1000.00", "currency": "EUR", "invoice_id": "INV-2001",
+  "match_tier": "exact_amount", "difference": "0.00",
+  "fx": { "rate": "1.0922", "route": ["EUR", "GBP", "USD"], "converted_amount": "1092.20" } }
+```
+
 An unmatched payment is a normal result, not an error. If a payment ID was already
 processed by an earlier request, the batch is rejected with **409 `DUPLICATE_PAYMENT`**.
+
+### `POST /fx/rates/batch` → `201 Created`
+
+```json
+{ "rates": [
+    { "from": "EUR", "to": "USD", "rate": "1.08" },
+    { "from": "EUR", "to": "GBP", "rate": "0.86" },
+    { "from": "GBP", "to": "USD", "rate": "1.27" }
+] }
+```
+
+A quote is directed: `EUR → USD` says nothing about `USD → EUR`. A later batch
+can replace a quote. One invalid record rejects the whole batch.
+
+| Query | Returns |
+|---|---|
+| `GET /fx/rates` | Every registered quote |
+| `GET /fx/rates/{FROM}/{TO}` | The direct quote |
+| `GET /fx/routes/{FROM}/{TO}` | The direct quote plus every route through one intermediate currency, ascending by rate |
+| `GET /fx/best/{FROM}/{TO}` | The best rate over all simple paths of up to 4 conversions |
 
 ### Reads
 
@@ -103,6 +136,8 @@ Every error uses the same shape:
 | 405 | `METHOD_NOT_ALLOWED` | Wrong method for the route (the response includes an `Allow` header) |
 | 409 | `IDEMPOTENCY_KEY_CONFLICT` | The same key was sent with a different request |
 | 409 | `DUPLICATE_INVOICE` / `DUPLICATE_PAYMENT` | The ID already exists or was already processed |
+| 404 | `NOT_FOUND` | No FX quote or route between the two currencies |
+| 422 | `FX_RATE_UNAVAILABLE` | A payment's currency can't be converted to the base currency (nothing is applied) |
 | 411 / 413 / 415 | — | `Content-Length` is missing, the body is over 1 MiB, or the content type isn't JSON |
 | 422 | `VALIDATION_FAILED` | One or more fields are invalid |
 | 500 | `INTERNAL_ERROR` | Unexpected error. The outcome is **not** stored, so retrying is safe. |
@@ -145,6 +180,25 @@ are *not* stored, so the client can retry once the fault is fixed.
 parsed directly from the JSON text into `Decimal`, and is always serialised as
 a string.
 
+**Why search simple paths for the best FX rate?** Taking `-log(rate)` turns
+"best rate" into "shortest path", but if some loop of conversions multiplies to
+more than 1 (an arbitrage cycle), going round it forever keeps improving the
+"rate", and Bellman-Ford or Dijkstra stop giving a meaningful answer. Searching
+only simple paths (no currency visited twice) keeps the answer well defined.
+The search is exponential in the worst case, so it is capped at 4 conversions,
+which is plenty for real currency pairs.
+
+**Why compare FX rates with a tolerance?** Two routes can give rates that differ
+only in the 12th decimal place. Treating those as equal, and then preferring
+fewer conversions, picks the route a treasury team would actually use, and
+keeps the choice stable as quotes are re-registered with tiny changes. All the
+arithmetic is `Decimal`, and the rounded rate that is shown is the exact rate
+used for conversion, so every result can be reproduced by hand.
+
+**Why reject a batch with an unconvertible payment?** Matching it in the wrong
+currency would settle the wrong invoice. Skipping it would quietly split the
+batch. Rejecting the batch keeps the all-or-nothing rule.
+
 **How do we know the concurrency tests work?** Removing the lock (and widening
 the race window with a 1 ms sleep) makes 4 of the 6 concurrency tests fail. A
 test that can't fail proves nothing.
@@ -167,7 +221,10 @@ before it replies.
   `SELECT … FOR UPDATE SKIP LOCKED` or a unique constraint on
   `settled_by`, and a transactional idempotency table.
 - Idempotency records never expire. Add a TTL, such as 24 hours like Stripe uses.
-- One currency only. A `currency` field would need to be part of every match key.
+- Invoices are in one base currency. Supporting invoices in several currencies
+  would mean adding the currency to every match key.
+- Rates have no timestamps. A real treasury setup would convert at the rate in
+  force on the payment's value date.
 - Partial payments, and payments that cover several invoices, are out of scope.
 
 ## Project layout
@@ -176,10 +233,11 @@ before it replies.
 src/reconcilehub/
   validation.py   parsing + field-level validation
   matching.py     tiered matching, tie-breaking, amount index
+  fx.py           exchange-rate book, route search, rate-batch validation
   service.py      atomic batches, idempotency, locking, undo journal
   http_api.py     REST adapter (http.server, ThreadingHTTPServer)
   errors.py       typed errors -> HTTP status + stable codes
-tests/            91 tests: validation, matching, idempotency/atomicity, concurrency, HTTP
+tests/            126 tests: validation, matching, FX, idempotency/atomicity, concurrency, HTTP
 ```
 
 ## License

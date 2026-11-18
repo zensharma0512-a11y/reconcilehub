@@ -8,6 +8,11 @@ GET  /invoices[?status=paid|unpaid]
 GET  /invoices/{id}
 POST /payments/batch            match + settle payments atomically (Idempotency-Key required)
 GET  /payments/{id}
+POST /fx/rates/batch            register exchange-rate quotes atomically (Idempotency-Key required)
+GET  /fx/rates                  every registered quote
+GET  /fx/rates/{FROM}/{TO}      the direct quote
+GET  /fx/routes/{FROM}/{TO}     direct + one-intermediate routes, ascending by rate
+GET  /fx/best/{FROM}/{TO}       best rate over all simple paths
 
 Status codes
 ------------
@@ -43,6 +48,11 @@ _ROUTES: list[tuple[re.Pattern[str], dict[str, str]]] = [
     (re.compile(r"^/invoices/(?P<id>[^/]+)$"), {"GET": "get_invoice"}),
     (re.compile(r"^/payments/batch$"), {"POST": "post_payments"}),
     (re.compile(r"^/payments/(?P<id>[^/]+)$"), {"GET": "get_payment"}),
+    (re.compile(r"^/fx/rates/batch$"), {"POST": "post_fx_rates"}),
+    (re.compile(r"^/fx/rates$"), {"GET": "list_fx_rates"}),
+    (re.compile(r"^/fx/rates/(?P<src>[^/]+)/(?P<dst>[^/]+)$"), {"GET": "fx_direct"}),
+    (re.compile(r"^/fx/routes/(?P<src>[^/]+)/(?P<dst>[^/]+)$"), {"GET": "fx_routes"}),
+    (re.compile(r"^/fx/best/(?P<src>[^/]+)/(?P<dst>[^/]+)$"), {"GET": "fx_best"}),
 ]
 
 
@@ -178,6 +188,21 @@ class ReconcileHandler(BaseHTTPRequestHandler):
 
     def _h_post_payments(self, params: dict[str, str], query: dict[str, list[str]]):
         return self._write(self.service.process_payments)
+
+    def _h_post_fx_rates(self, params: dict[str, str], query: dict[str, list[str]]):
+        return self._write(self.service.register_fx_rates)
+
+    def _h_list_fx_rates(self, params: dict[str, str], query: dict[str, list[str]]):
+        return 200, {"rates": self.service.fx_quotes()}, None
+
+    def _h_fx_direct(self, params: dict[str, str], query: dict[str, list[str]]):
+        return 200, self.service.fx_direct(params["src"], params["dst"]), None
+
+    def _h_fx_routes(self, params: dict[str, str], query: dict[str, list[str]]):
+        return 200, {"routes": self.service.fx_routes(params["src"], params["dst"])}, None
+
+    def _h_fx_best(self, params: dict[str, str], query: dict[str, list[str]]):
+        return 200, self.service.fx_best(params["src"], params["dst"]), None
 
 
 class ReconcileServer(ThreadingHTTPServer):

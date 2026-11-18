@@ -44,6 +44,7 @@ class PaymentInput:
     id: str
     amount: Decimal
     memo: str = ""
+    currency: str | None = None  # None = the service's base currency
 
 
 @dataclass
@@ -74,7 +75,9 @@ class PaymentResult:
     memo: str
     invoice_id: str | None
     tier: MatchTier | None
-    difference: Decimal | None = field(default=None)  # payment - invoice
+    difference: Decimal | None = field(default=None)  # payment - invoice, in base currency
+    currency: str = ""
+    fx: dict[str, Any] | None = None  # set when the payment was converted
 
     @property
     def matched(self) -> bool:
@@ -89,4 +92,6 @@ class PaymentResult:
             "invoice_id": self.invoice_id,
             "match_tier": self.tier.value if self.tier else None,
             "difference": money_str(self.difference) if self.difference is not None else None,
+            "currency": self.currency,
+            "fx": dict(self.fx, route=list(self.fx["route"])) if self.fx else None,
         }

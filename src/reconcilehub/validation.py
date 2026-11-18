@@ -25,7 +25,8 @@ MAX_BATCH = 1000
 MAX_MEMO = 500
 
 INVOICE_FIELDS = {"id", "amount", "due_date"}
-PAYMENT_FIELDS = {"id", "amount", "memo"}
+PAYMENT_FIELDS = {"id", "amount", "memo", "currency"}
+CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 def _reject_constant(name: str) -> Any:
@@ -193,15 +194,25 @@ def parse_payment_batch(body: Any) -> list[PaymentInput]:
             memo = ""
         elif len(memo) > MAX_MEMO:
             errors.add(f"{path}.memo", f"must be at most {MAX_MEMO} characters")
+        currency = item.get("currency")
+        if currency is not None and (not isinstance(currency, str) or not CURRENCY_RE.match(currency)):
+            errors.add(f"{path}.currency", "must be a 3-letter upper-case ISO 4217 code, e.g. 'EUR'")
+            currency = None
         if pay_id is not None:
             if pay_id in seen:
                 errors.add(f"{path}.id", f"duplicates payments[{seen[pay_id]}].id in this batch")
             else:
                 seen[pay_id] = i
         if pay_id is not None and amount is not None:
-            out.append(PaymentInput(pay_id, amount, memo))
+            out.append(PaymentInput(pay_id, amount, memo, currency))
     errors.raise_if_any()
     return out
+
+
+def parse_currency(value: str) -> str:
+    if not isinstance(value, str) or not CURRENCY_RE.match(value):
+        raise ValueError("currency must be a 3-letter upper-case ISO 4217 code, e.g. 'USD'")
+    return value
 
 
 def parse_tolerance(value: str | Decimal) -> Decimal:

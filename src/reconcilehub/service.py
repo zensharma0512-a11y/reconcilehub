@@ -10,6 +10,11 @@ Guarantees
 * **Idempotent retries** - a request carries an idempotency key. Replaying the
   same key with the same request returns the stored response without
   re-executing; the same key with a different request is rejected (409).
+* **Multi-currency payments** - invoices are in one base currency. A payment
+  in another currency is converted with the best route in the FX rate book
+  (see ``fx.py``) before matching, and the rate and route are recorded on the
+  result. Rates are read under the same lock as the batch, so one batch never
+  sees two versions of the book.
 * **Thread safety** - every public method runs under one lock. Matching needs a
   consistent view of *all* unpaid invoices (a payment may match any of them),
   so a single coarse lock is the simplest design that is obviously correct.
@@ -23,21 +28,23 @@ import hashlib
 import json
 import threading
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any, Callable
 
 from .errors import (
     DuplicateInvoice,
     DuplicatePayment,
+    FxRateUnavailable,
     IdempotencyConflict,
     MissingIdempotencyKey,
     NotFound,
     ReconcileError,
     ValidationFailed,
 )
+from .fx import MAX_HOPS, RateBook, Route, parse_rate_batch, rate_str
 from .matching import UnpaidIndex, find_match
-from .models import Invoice, InvoiceStatus, PaymentResult, money_str
-from .validation import parse_invoice_batch, parse_payment_batch, parse_tolerance
+from .models import CENT, Invoice, InvoiceStatus, PaymentInput, PaymentResult, money_str
+from .validation import parse_currency, parse_invoice_batch, parse_payment_batch, parse_tolerance
 
 FaultHook = Callable[[str, int], None]
 MAX_KEY_LEN = 255
@@ -79,8 +86,16 @@ def _check_key(key: str | None) -> str:
 
 
 class ReconciliationService:
-    def __init__(self, tolerance: str | Decimal = "1.00", fault_hook: FaultHook | None = None) -> None:
+    def __init__(
+        self,
+        tolerance: str | Decimal = "1.00",
+        fault_hook: FaultHook | None = None,
+        base_currency: str = "USD",
+        fx_max_hops: int = MAX_HOPS,
+    ) -> None:
         self.tolerance = parse_tolerance(tolerance)
+        self.base_currency = parse_currency(base_currency)
+        self._fx = RateBook(max_hops=fx_max_hops)
         self._lock = threading.Lock()
         self._invoices: dict[str, Invoice] = {}
         self._unpaid = UnpaidIndex()
@@ -97,6 +112,9 @@ class ReconciliationService:
 
     def process_payments(self, idempotency_key: str | None, body: Any) -> Outcome:
         return self._idempotent("process_payments", idempotency_key, body, self._process_payments)
+
+    def register_fx_rates(self, idempotency_key: str | None, body: Any) -> Outcome:
+        return self._idempotent("register_fx_rates", idempotency_key, body, self._register_fx_rates)
 
     def _idempotent(
         self,
@@ -168,6 +186,49 @@ class ReconciliationService:
             "invoices": [inv.to_dict() for inv in added],
         }
 
+    def _register_fx_rates(self, body: Any) -> tuple[int, dict[str, Any]]:
+        quotes = parse_rate_batch(body)  # raises before any mutation
+        count = self._fx.apply(quotes, on_step=lambda i: self._fault("register_fx_rates", i))
+        return 201, {
+            "registered": count,
+            "rates": [{"from": q.source, "to": q.target, "rate": rate_str(q.rate)} for q in quotes],
+        }
+
+    def _convert_all(self, inputs: list[PaymentInput]) -> dict[str, tuple[Decimal, Route]]:
+        """Convert every foreign-currency payment up front, before any mutation.
+
+        If any payment can't be converted, the whole batch is rejected, the same
+        way an invalid field rejects it.
+        """
+        conversions: dict[str, tuple[Decimal, Route]] = {}
+        problems: list[dict[str, str]] = []
+        for i, pay in enumerate(inputs):
+            currency = pay.currency or self.base_currency
+            if currency == self.base_currency:
+                continue
+            try:
+                raw, route = self._fx.convert(pay.amount, currency, self.base_currency)
+            except NotFound:
+                problems.append({
+                    "field": f"payments[{i}].currency",
+                    "message": f"no {currency}->{self.base_currency} rate or route is registered",
+                })
+                continue
+            converted = raw.quantize(CENT, rounding=ROUND_HALF_EVEN)
+            if converted <= 0:
+                problems.append({
+                    "field": f"payments[{i}].amount",
+                    "message": f"converts to less than 0.01 {self.base_currency}",
+                })
+                continue
+            conversions[pay.id] = (converted, route)
+        if problems:
+            raise FxRateUnavailable(
+                f"{len(problems)} payment(s) can't be converted to {self.base_currency}; nothing was applied",
+                problems,
+            )
+        return conversions
+
     def _process_payments(self, body: Any) -> tuple[int, dict[str, Any]]:
         inputs = parse_payment_batch(body)  # raises before any mutation
 
@@ -178,14 +239,30 @@ class ReconciliationService:
                 [{"field": "payments", "message": f"payment '{p}' was already processed"} for p in already],
             )
 
+        conversions = self._convert_all(inputs)
+
         settled: list[Invoice] = []
         recorded: list[str] = []
         results: list[PaymentResult] = []
         try:
             for i, pay in enumerate(inputs):
-                match = find_match(pay, self._invoices, self._unpaid, self.tolerance)
+                currency = pay.currency or self.base_currency
+                fx_info = None
+                matchable = pay
+                if pay.id in conversions:
+                    converted, route = conversions[pay.id]
+                    # Match on the amount in the base currency.
+                    matchable = PaymentInput(pay.id, converted, pay.memo)
+                    fx_info = {
+                        "rate": rate_str(route.rate),
+                        "route": list(route.path),
+                        "converted_amount": money_str(converted),
+                    }
+                match = find_match(matchable, self._invoices, self._unpaid, self.tolerance)
                 if match is None:
-                    result = PaymentResult(pay.id, pay.amount, pay.memo, None, None)
+                    result = PaymentResult(
+                        pay.id, pay.amount, pay.memo, None, None, currency=currency, fx=fx_info
+                    )
                 else:
                     inv = match.invoice
                     # Mark paid and remove from the index together: once this
@@ -197,7 +274,14 @@ class ReconciliationService:
                     inv.match_tier = match.tier
                     settled.append(inv)
                     result = PaymentResult(
-                        pay.id, pay.amount, pay.memo, inv.id, match.tier, match.difference(pay.amount)
+                        pay.id,
+                        pay.amount,
+                        pay.memo,
+                        inv.id,
+                        match.tier,
+                        match.difference(matchable.amount),
+                        currency=currency,
+                        fx=fx_info,
                     )
                 self._payments[pay.id] = result
                 recorded.append(pay.id)
@@ -220,6 +304,7 @@ class ReconciliationService:
                 "matched": matched,
                 "unmatched": len(results) - matched,
                 "tolerance": money_str(self.tolerance),
+                "base_currency": self.base_currency,
             },
             "results": [r.to_dict() for r in results],
         }
@@ -250,6 +335,24 @@ class ReconciliationService:
                 raise NotFound(f"Payment '{payment_id}' not found")
             return result.to_dict()
 
+    # --------------------------------------------------------------- fx reads
+
+    def fx_quotes(self) -> list[dict[str, str]]:
+        with self._lock:
+            return self._fx.quotes()
+
+    def fx_direct(self, source: str, target: str) -> dict[str, Any]:
+        with self._lock:
+            return self._fx.direct(source, target).to_dict()
+
+    def fx_routes(self, source: str, target: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [r.to_dict() for r in self._fx.routes(source, target)]
+
+    def fx_best(self, source: str, target: str) -> dict[str, Any]:
+        with self._lock:
+            return self._fx.best(source, target).to_dict()
+
     def stats(self) -> dict[str, Any]:
         with self._lock:
             paid = sum(1 for i in self._invoices.values() if i.status is InvoiceStatus.PAID)
@@ -259,4 +362,6 @@ class ReconciliationService:
                 "invoices_unpaid": len(self._invoices) - paid,
                 "payments": len(self._payments),
                 "tolerance": money_str(self.tolerance),
+                "base_currency": self.base_currency,
+                "fx_quotes": len(self._fx.quotes()),
             }

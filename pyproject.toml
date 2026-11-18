@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reconcilehub"
-version = "1.0.0"
-description = "Thread-safe payment-to-invoice reconciliation service with tiered matching, idempotent retries and atomic batches."
+version = "1.1.0"
+description = "Thread-safe payment-to-invoice reconciliation service with tiered matching, multi-currency FX conversion, idempotent retries and atomic batches."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Aryan Sharma" }]

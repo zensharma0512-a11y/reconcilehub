@@ -14,10 +14,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--tolerance", default="1.00", help="amount tolerance for tier-3 matching")
+    parser.add_argument("--base-currency", default="USD", help="currency invoices are issued in")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    server = make_server(ReconciliationService(tolerance=args.tolerance), args.host, args.port)
+    server = make_server(ReconciliationService(tolerance=args.tolerance, base_currency=args.base_currency), args.host, args.port)
     host, port = server.server_address[:2]
     logging.getLogger("reconcilehub").info("listening on http://%s:%s (tolerance=%s)", host, port, args.tolerance)
     try:

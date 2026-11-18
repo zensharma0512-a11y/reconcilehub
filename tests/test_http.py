@@ -115,3 +115,39 @@ def test_concurrent_http_clients_settle_each_invoice_once(server):
     assert all(s == 200 for s, _, _ in results)
     matched = [b for _, b, _ in results if b["summary"]["matched"] == 1]
     assert len(matched) == 1
+
+
+def test_fx_endpoints(server):
+    rates = {"rates": [
+        {"from": "EUR", "to": "USD", "rate": "1.10"},
+        {"from": "EUR", "to": "GBP", "rate": "0.85"},
+        {"from": "GBP", "to": "USD", "rate": "1.30"},
+    ]}
+    status, body, _ = call(server, "POST", "/fx/rates/batch", rates, key="fx-1")
+    assert status == 201 and body["registered"] == 3
+    status, body, _ = call(server, "GET", "/fx/rates/EUR/USD")
+    assert status == 200 and body["rate"] == "1.1"
+    status, body, _ = call(server, "GET", "/fx/routes/EUR/USD")
+    assert [r["path"] for r in body["routes"]] == [["EUR", "USD"], ["EUR", "GBP", "USD"]]
+    status, body, _ = call(server, "GET", "/fx/best/EUR/USD")
+    assert body == {"path": ["EUR", "GBP", "USD"], "hops": 2, "rate": "1.105"}
+    assert call(server, "GET", "/fx/best/USD/EUR")[0] == 404
+    assert call(server, "GET", "/fx/best/eur/USD")[0] == 422
+    status, body, _ = call(server, "GET", "/fx/rates")
+    assert len(body["rates"]) == 3
+
+
+def test_foreign_payment_over_http(server):
+    call(server, "POST", "/fx/rates/batch", {"rates": [{"from": "EUR", "to": "USD", "rate": "1.10"}]}, key="fx-2")
+    call(server, "POST", "/invoices/batch", {"invoices": [{"id": "INV-9", "amount": "110.00"}]}, key="inv-9")
+    status, body, _ = call(
+        server, "POST", "/payments/batch",
+        {"payments": [{"id": "PAY-9", "amount": "100.00", "currency": "EUR"}]}, key="pay-9",
+    )
+    r = body["results"][0]
+    assert status == 200 and r["invoice_id"] == "INV-9" and r["fx"]["converted_amount"] == "110.00"
+    status, body, _ = call(
+        server, "POST", "/payments/batch",
+        {"payments": [{"id": "PAY-10", "amount": "5.00", "currency": "CHF"}]}, key="pay-10",
+    )
+    assert status == 422 and body["error"]["code"] == "FX_RATE_UNAVAILABLE"
