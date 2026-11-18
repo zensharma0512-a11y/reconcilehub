@@ -15,6 +15,12 @@ Guarantees
   (see ``fx.py``) before matching, and the rate and route are recorded on the
   result. Rates are read under the same lock as the batch, so one batch never
   sees two versions of the book.
+* **Optional audit trail** - pass any object with an ``append(actor, action,
+  payload)`` method (for example a ``chainlog.AuditLog``) as ``audit``. Every
+  applied batch is written to it as the last step of that batch, inside the
+  undo journal: if the audit write fails, the batch is rolled back, so the
+  service never settles an invoice without a matching audit entry. Replays
+  and rejected batches change nothing and are not logged.
 * **Thread safety** - every public method runs under one lock. Matching needs a
   consistent view of *all* unpaid invoices (a payment may match any of them),
   so a single coarse lock is the simplest design that is obviously correct.
@@ -29,7 +35,7 @@ import json
 import threading
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .errors import (
     DuplicateInvoice,
@@ -48,6 +54,13 @@ from .validation import parse_currency, parse_invoice_batch, parse_payment_batch
 
 FaultHook = Callable[[str, int], None]
 MAX_KEY_LEN = 255
+AUDIT_ACTOR = "reconcilehub"
+
+
+class AuditSink(Protocol):
+    """Anything that can record an audit entry. ``chainlog.AuditLog`` fits."""
+
+    def append(self, actor: str, action: str, payload: dict[str, Any] | None = None) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -92,7 +105,9 @@ class ReconciliationService:
         fault_hook: FaultHook | None = None,
         base_currency: str = "USD",
         fx_max_hops: int = MAX_HOPS,
+        audit: AuditSink | None = None,
     ) -> None:
+        self.audit = audit
         self.tolerance = parse_tolerance(tolerance)
         self.base_currency = parse_currency(base_currency)
         self._fx = RateBook(max_hops=fx_max_hops)
@@ -151,6 +166,11 @@ class ReconciliationService:
         if self._fault_hook is not None:
             self._fault_hook(stage, i)
 
+    def _record(self, action: str, payload: dict[str, Any]) -> None:
+        """Write one audit entry. Called inside a batch's undo journal."""
+        if self.audit is not None:
+            self.audit.append(AUDIT_ACTOR, action, payload)
+
     def _register_invoices(self, body: Any) -> tuple[int, dict[str, Any]]:
         inputs = parse_invoice_batch(body)  # raises before any mutation
 
@@ -171,6 +191,10 @@ class ReconciliationService:
                 added.append(inv)
                 self._unpaid.add(inv)
                 self._fault("register_invoices", i)
+            self._record(
+                "invoices.registered",
+                {"invoices": [{"id": v.id, "amount": money_str(v.amount)} for v in added]},
+            )
         except BaseException:
             for inv in reversed(added):
                 self._invoices.pop(inv.id, None)
@@ -287,6 +311,7 @@ class ReconciliationService:
                 recorded.append(pay.id)
                 results.append(result)
                 self._fault("process_payments", i)
+            self._record("payments.processed", {"results": [r.to_dict() for r in results]})
         except BaseException:
             for pid in reversed(recorded):
                 del self._payments[pid]

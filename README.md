@@ -33,9 +33,10 @@ POST /payments/batch   ──►  validate all ──► for each payment:
 | Thread safety | A single lock covers check, execute and store. Stress tests use 64 threads released together through a barrier. | `tests/test_concurrency.py` (fails if the lock is removed) |
 | Multi-currency payments | Directed exchange-rate quotes are registered in atomic batches. A foreign payment is converted along the best route (searching simple paths, so arbitrage loops can't break it) and the rate and route are recorded on the result. A payment with no route rejects its whole batch. | `tests/test_fx.py` |
 | Deterministic FX routes | Rates within 1e-9 (relative) of the best count as equal; then fewer hops win, then the alphabetically smallest path. Errors in a rate batch are always reported in the same fixed order. | `test_near_ties_prefer_fewer_hops_then_alphabetical_path`, `test_errors_come_in_fixed_order` |
+| Tamper-evident audit trail (optional) | Every applied batch is appended to a [chainlog](https://github.com/zensharma0512-a11y/chainlog) hash chain as the last step of the batch, inside the undo journal. If the audit write fails, the batch rolls back, so nothing is settled without a record. Editing a stored entry later breaks the chain. | `tests/test_audit.py` |
 | REST and status codes | 200, 201, 400, 404, 405 (with an `Allow` header), 409, 411, 413, 415, 422, 500 | `tests/test_http.py` |
 
-**126 tests, about 7 seconds.**
+**131 tests, about 7 seconds.**
 
 ## Quick start
 
@@ -43,11 +44,37 @@ POST /payments/batch   ──►  validate all ──► for each payment:
 git clone https://github.com/zensharma0512-a11y/reconcilehub.git
 cd reconcilehub
 python -m pip install -e ".[dev]"     # only pytest is installed, for tests
-python -m pytest                       # run the 126 tests
+python -m pytest                       # run the tests
 python -m reconcilehub --port 8080 --tolerance 1.00 --base-currency USD
 ```
 
 Then, in another terminal, run `./examples/demo.sh` to try every endpoint.
+
+### With an audit trail
+
+The core has no runtime dependencies. The audit trail is an optional extra
+that uses [chainlog](https://github.com/zensharma0512-a11y/chainlog), a
+tamper-evident log I wrote as a separate library:
+
+```bash
+python -m pip install -e ".[audit]"
+export CHAINLOG_KEY=change-me          # HMAC key, so the chain can't be rebuilt without it
+python -m reconcilehub --audit-log audit.db
+
+# later, or from a cron job:
+CHAINLOG_DB=audit.db chainlog verify   # OK: 12 entries verified
+CHAINLOG_DB=audit.db chainlog tail -n 5
+```
+
+Each applied batch becomes one entry: `invoices.registered` (IDs and amounts)
+or `payments.processed` (every result, including the FX rate and route used).
+Replays and rejected batches change nothing, so they are not logged. From
+Python, pass any object with an `append(actor, action, payload)` method:
+
+```python
+from chainlog import AuditLog
+service = ReconciliationService(audit=AuditLog("audit.db", key="change-me"))
+```
 
 ## API
 
@@ -234,10 +261,10 @@ src/reconcilehub/
   validation.py   parsing + field-level validation
   matching.py     tiered matching, tie-breaking, amount index
   fx.py           exchange-rate book, route search, rate-batch validation
-  service.py      atomic batches, idempotency, locking, undo journal
+  service.py      atomic batches, idempotency, locking, undo journal, audit hook
   http_api.py     REST adapter (http.server, ThreadingHTTPServer)
   errors.py       typed errors -> HTTP status + stable codes
-tests/            126 tests: validation, matching, FX, idempotency/atomicity, concurrency, HTTP
+tests/            131 tests: validation, matching, FX, idempotency/atomicity, concurrency, audit, HTTP
 ```
 
 ## License

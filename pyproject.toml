@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reconcilehub"
-version = "1.1.0"
+version = "1.2.0"
 description = "Thread-safe payment-to-invoice reconciliation service with tiered matching, multi-currency FX conversion, idempotent retries and atomic batches."
 readme = "README.md"
 license = { text = "MIT" }
@@ -14,6 +14,7 @@ dependencies = []  # standard library only
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+audit = ["chainlog @ git+https://github.com/zensharma0512-a11y/chainlog"]
 
 [project.scripts]
 reconcilehub = "reconcilehub.__main__:main"
